@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 const glados = async () => {
   const notice = [];
   if (!process.env.GLADOS) {
@@ -15,6 +16,14 @@ const glados = async () => {
     notice.push("❌ 未检测到有效 GLADOS Cookie");
     return notice;
   }
+
+  // 新增：校验Cookie是否包含核心字段
+  cookies.forEach((cookie, idx) => {
+    const cookieTrim = cookie.trim();
+    if (!cookieTrim.includes('koa:sess') || !cookieTrim.includes('koa:sess.sig')) {
+      console.warn(`⚠️ 账号 ${idx+1} Cookie 缺失核心字段（koa:sess/koa:sess.sig），可能无效`);
+    }
+  });
 
   console.log(`🚀 开始处理 ${cookies.length} 个账号...\n`);
 
@@ -48,16 +57,29 @@ const glados = async () => {
           method: "GET",
           headers: commonHeaders,
         });
+        // 新增：打印响应状态码，方便排查
+        console.log(`📌 账号状态接口响应码: ${statusRes.status}`);
+        if (!statusRes.ok) {
+          throw new Error(`接口返回非200状态码: ${statusRes.status}`);
+        }
         const statusData = await statusRes.json();
         if (statusData.code === 0) {
           email = statusData.data.email || "未知";
           days = `${Math.floor(Number(statusData.data.leftDays))} 天`;
           console.log(`✅ 登录成功: ${email} (剩余 ${days})`);
         } else {
-          console.log(`⚠️ 登录状态异常: ${statusData.message || 'Cookie 可能已失效'}`);
+          console.log(`⚠️ 登录状态异常: ${statusData.message || 'Cookie 可能已失效'} (code: ${statusData.code})`);
+          status = "❌ 无权限";
+          fail += 1;
+          detailLines.push(`${idx + 1}. ${email} | ${status} | 原因:${statusData.message}`);
+          continue; // 跳过签到，直接处理下一个账号
         }
       } catch (e) {
-        console.log(`⚠️ 账号状态查询失败 (不影响签到)`);
+        console.log(`⚠️ 账号状态查询失败: ${e.message} (大概率是Cookie无效/无权限)`);
+        status = "❌ 无权限";
+        fail += 1;
+        detailLines.push(`${idx + 1}. [未知账号] | ${status} | 原因:${e.message}`);
+        continue;
       }
 
       // 2. 执行签到请求
@@ -147,7 +169,6 @@ const notify = async (notice) => {
           body: JSON.stringify({
             msgtype: 'markdown',
             markdown: {
-                // 企业微信 Markdown 换行建议使用 \n
                 content: notice.join('\n\n') 
             }
           }),
