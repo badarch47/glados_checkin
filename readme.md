@@ -16,7 +16,9 @@ GitHub Actions 实现 [GLaDOS][glados] 自动签到
 
 ## 高级功能
 
-1. 如有多个帐号, 可以写为多行 Secret `GLADOS`, 每行写一个 Cookie
+1. 如有多个帐号, 可以写为多行 Secret `GLADOS`, 每行写一个 Cookie，多个cookie之间用&组合
+
+2. 在设置-操作-密钥里面新建密钥，密钥名称为GLADOS，写koa:sess=xxxlong; koa:sess.sig=zzzzzzshort
 
 1. 如需修改时间, 可以修改文件 [run.yml](.github/workflows/run.yml#L7) 中的 `cron` 参数, 格式可参考 [crontab]
 
