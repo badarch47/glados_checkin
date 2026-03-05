@@ -1,21 +1,72 @@
-name: run
+name: GLaDOS 自动签到（带详细日志）
 
+# 触发条件：手动触发、代码推送、定时触发（UTC 16:10 = 北京时间 00:10）
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # 手动触发（推荐，方便测试）
   push:
+    branches: [ main ]  # 仅推送到main分支时触发（避免无关推送触发）
   schedule:
-    - cron: 10 16 * * *
+    - cron: '10 16 * * *'  # 注意：此为UTC时间，北京时间=UTC+8 → 对应凌晨00:10
 
 jobs:
-  run:
+  glados-checkin:
+    name: 执行GLaDOS签到
     runs-on: ubuntu-latest
+    # 确保步骤出错时立即终止，日志更清晰
+    defaults:
+      run:
+        shell: bash
+        working-directory: .
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
+      - name: 🔍 检出代码仓库
+        uses: actions/checkout@v4  # 升级到最新版，更稳定
+
+      - name: 🟢 配置Node.js环境（v18）
+        uses: actions/setup-node@v4
         with:
           node-version: 18
-      - run: npm ci
-      - run: npm run main
+          cache: 'npm'  # 缓存node_modules，加快运行速度
+
+      - name: 📦 安装依赖（带详细日志）
+        run: |
+          echo "======= 开始安装项目依赖 ======="
+          npm ci --verbose  # --verbose 输出详细安装日志，方便排查依赖问题
+          echo "======= 依赖安装完成 ======="
+
+      - name: 🧪 验证环境变量（仅打印是否存在，不泄露敏感信息）
+        run: |
+          echo "======= 环境变量验证 ======="
+          if [ -n "$GLADOS" ]; then
+            echo "✅ GLADOS Cookie 环境变量已配置（已脱敏）"
+          else
+            echo "❌ GLADOS Cookie 环境变量未配置"
+          fi
+          if [ -n "$NOTIFY" ]; then
+            echo "✅ NOTIFY 推送配置已配置（已脱敏）"
+          else
+            echo "ℹ️ NOTIFY 推送配置未配置"
+          fi
+          echo "======= 环境变量验证完成 ======="
         env:
           GLADOS: ${{ secrets.GLADOS }}
           NOTIFY: ${{ secrets.NOTIFY }}
+
+      - name: 🚀 执行签到脚本（输出完整运行日志）
+        run: |
+          echo "======= 开始执行GLaDOS签到脚本 ======="
+          npm run main
+          echo "======= 签到脚本执行完成 ======="
+        env:
+          GLADOS: ${{ secrets.GLADOS }}
+          NOTIFY: ${{ secrets.NOTIFY }}
+        # 即使签到失败，也让工作流继续（避免误判）
+        continue-on-error: false
+
+      - name: 📝 运行结果总结
+        if: always()  # 无论前面步骤是否失败，都执行此步骤
+        run: |
+          echo "======= 本次运行总结 ======="
+          echo "📅 运行时间：$(date +'%Y-%m-%d %H:%M:%S')"
+          echo "💻 运行环境：Ubuntu ${{ runner.os }}"
+          echo "ℹ️ 查看上方「执行签到脚本」步骤的日志，可看到登录/签到详细结果"
+          echo "======= 总结结束 ======="
