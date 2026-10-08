@@ -10,9 +10,10 @@ GitHub Actions 实现 [GLaDOS][glados] 自动签到
 
 1. 登录 [GLaDOS][glados] 获取 Cookie
 
-1. 添加 Cookie 到 Secret `GLADOS`
+1. 添加 Cookie 到 Secret `GLADOS`,cookie格式 gld:sess.sig=对应的值; gld:sess=对应的值; koa:sess.sig=对应的值; koa:sess=对应的值
+1.cookie获取，浏览器按f12存储里面就是，四个都要带上
 
-1. 添加同一浏览器的 User-Agent 到 Secret `GLADOS_UA` (浏览器控制台执行 `navigator.userAgent` 获取)
+1. 添加同一浏览器的浏览器代理到 Secret `GLADOS_UA` (浏览器控制台执行 `navigator.userAgent` 获取)
 
     - GLaDOS 签到会校验当前浏览器是否与登录时一致, UA 不一致会返回 `没有权限`
     - 浏览器大版本更新后 UA 会变化, 如再次报错需重新登录并同时更新 `GLADOS` 与 `GLADOS_UA`
