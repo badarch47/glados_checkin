@@ -28,22 +28,53 @@ const EXCELLENT_DELAY_MAX_MS = 5000 // 前端评级 excellent 上限（<=5s）
 const checkinProof = (nonce) =>
   createHash('sha256').update(`${nonce}.${PROOF_SALT}`, 'utf8').digest('hex')
 
-// ========== 积分构成还原 ==========
-// 逆向自 renderPointsBreakdown()：
-//   最终积分 = Base + Plan 加成 + Streak 加成 + Cable 加成
-//   Plan  : vip==31 -> +1 | vip==41 -> +1.5 | vip==51 -> +2
-//   Streak: >7 天 -> +1 | >14 天 -> +2
-//   Cable : IQI quality.score  <80 -> +8 | <85 -> +5 | <90 -> +3 | <=95 -> +2 | >95 -> +1
-const planBonus = (vip) => (Number(vip) === 31 ? 1 : Number(vip) === 41 ? 1.5 : Number(vip) === 51 ? 2 : 0)
-const streakBonus = (streak) => (Number(streak) > 14 ? 2 : Number(streak) > 7 ? 1 : 0)
-const cableBonus = (score) => {
+// ========== 积分构成（一律以服务端下发为准） ==========
+// 签到响应里的 breakdown 字段由服务端结算生成，前端结算卡片直接渲染它，
+// 逆向自 renderSettlement()：
+//   points  = base + level + streak + cable + lucky + site + exitIp
+//   base    随机基础分（每日必给，非固定值）
+//   level   套餐加成（Pro +1 / Team +1.5 / Enterprise +2）
+//   streak  连续签到加成（>7 天 +1，>=15 天 +2）
+//   cable   光缆加成，取值见 /api/user/network-insight 的 current.cablePoints
+//   lucky   幸运加成；site 站点加成；exitIp 出口 IP 加成
+// 注意：不要再用本地公式反推积分构成。此前用「Base1 + 套餐 + 连续 + 光缆」
+// 估算理论下限，光缆档位阈值写的是 80/85/90/95，与服务端实际档位
+// （90/95/100/110/131，档位分值 9/7/5/3/2/1）不符，会把正常得分误判为异常，
+// 也会把实际加成显示成错误数值。
+const BREAKDOWN_ORDER = [
+  ['base', '基础'],
+  ['level', '套餐'],
+  ['streak', '连续'],
+  ['cable', '光缆'],
+  ['lucky', '幸运'],
+  ['site', '站点'],
+  ['exitIp', '出口IP'],
+]
+
+const toNum = (v) => {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : 0
+}
+
+const formatBreakdown = (bd) => {
+  if (!bd) return ''
+  return BREAKDOWN_ORDER.map(([key, label]) => [label, toNum(bd[key])])
+    .filter(([, v]) => v !== 0)
+    .map(([label, v]) => `${label}+${v}`)
+    .join(' / ')
+}
+
+const breakdownSum = (bd) => BREAKDOWN_ORDER.reduce((sum, [key]) => sum + toNum(bd?.[key]), 0)
+
+// 光缆档位兜底换算：服务端 tiers 与前端判定边界一致（[90,95,100,110,131]）
+const cablePointsByTiers = (score, tiers) => {
   const s = Number(score)
-  if (!s || s <= 0) return 0
-  if (s < 80) return 8
-  if (s < 85) return 5
-  if (s < 90) return 3
-  if (s <= 95) return 2
-  return 1
+  if (!Number.isFinite(s) || !Array.isArray(tiers) || !tiers.length) return null
+  const bounds = [90, 95, 100, 110, 131]
+  for (let i = 0; i < bounds.length; i++) {
+    if (s < bounds[i]) return toNum(tiers[i]?.points) || null
+  }
+  return toNum(tiers[tiers.length - 1]?.points) || null
 }
 
 // ========== 判定辅助：服务端是否「看起来成功、实际降级」 ==========
@@ -233,6 +264,25 @@ const doCheckin = async (domain, headers) => {
   return res.json()
 }
 
+// ========== 网络质量指数（光缆加成的权威来源） ==========
+// /api/user/network-insight 返回：
+//   data.current = { score, level, cablePoints, ... }
+//   data.tiers   = [{ label:'90–94', points:7 }, ...]
+// cablePoints 就是本次签到可拿到的光缆加成，直接采用，不做本地换算。
+const getNetworkInsight = async (domain, headers) => {
+  const res = await fetch(`https://${domain}/api/user/network-insight`, { method: 'GET', headers })
+  if (!res.ok) throw new Error(`network-insight HTTP错误: ${res.status}`)
+  const body = await res.json()
+  if (body?.code !== 0) throw new Error(`network-insight 返回异常 (code=${body?.code})`)
+  const cur = body?.data?.current || {}
+  return {
+    score: cur.score ?? null,
+    level: cur.level ?? null,
+    cablePoints: cur.cablePoints ?? null,
+    tiers: body?.data?.tiers || [],
+  }
+}
+
 // ========== GLaDOS 签到核心逻辑 ==========
 const glados = async () => {
   const notice = []
@@ -301,13 +351,24 @@ const glados = async () => {
         )
       }
       let gained = null
+      let breakdown = null
       if (alreadyCheckedIn) {
         console.log(`[${tag}] 今日已签到过，继续查询剩余天数与积分...`)
       } else {
         gained = Number(action?.points)
+        breakdown = action?.breakdown || null
         console.log(
           `[${tag}] 本次获得积分: ${Number.isFinite(gained) ? gained + ' 分' : '未返回'} | 服务端消息: ${action?.message || ''}`
         )
+        if (breakdown) {
+          console.log(
+            `[${tag}] 🧾 服务端结算: 总计+${toNum(breakdown.points ?? gained)} = ${
+              formatBreakdown(breakdown) || '无加成项'
+            }`
+          )
+        } else {
+          console.log(`[${tag}] ℹ️ 签到响应未带 breakdown，无法展示逐项构成`)
+        }
       }
 
       // 2. 账号状态
@@ -338,56 +399,58 @@ const glados = async () => {
         console.log(`[${tag}] 💰 当前积分: ${currentPoints} 点 | 连续签到: ${streak} 天`)
         pointsSummary.push(`账号${accountNo}(${account.envName}): ${currentPoints} 点 / 连续 ${streak} 天`)
 
-        // 4. 光缆质量指数（决定 Cable 档加成，最高 +8）
-        let iqiScore = null
+        // 4. 光缆加成：以服务端 network-insight 的 cablePoints 为准
+        let cable = null
         try {
-          const iqiRes = await fetch(`https://${domain}/api/user/iqi`, { method: 'GET', headers })
-          const iqi = await iqiRes.json()
-          console.log(`[${tag}] IQI 接口: http=${iqiRes.status} code=${iqi?.code ?? '无'}`)
-          if (iqi?.code === 0) {
-            // 实测结构：{ code:0, data:{ quality:{ score, level }, bandwidth, latency, benchmark } }
-            iqiScore =
-              iqi?.data?.quality?.score ?? iqi?.quality?.score ?? iqi?.data?.score ?? null
-            if (iqiScore == null) {
-              console.log(`[${tag}] IQI 返回结构: ${JSON.stringify(iqi).slice(0, 300)}`)
-            } else {
-              console.log(`[${tag}] IQI 光缆指数: ${iqiScore} (${iqi?.data?.quality?.level || '?'})`)
-            }
-          } else {
-            console.log(`[${tag}] IQI 取值失败: ${iqi?.message || '未知'} (code=${iqi?.code})`)
+          const insight = await getNetworkInsight(domain, headers)
+          cable = insight.cablePoints
+          let cableNote = ''
+          if (cable == null && insight.score != null) {
+            cable = cablePointsByTiers(insight.score, insight.tiers)
+            cableNote = '（由 tiers 兜底换算）'
           }
-        } catch (iqiErr) {
-          console.log(`[${tag}] IQI 请求异常: ${iqiErr.message}`)
-        }
-        const pB = planBonus(status?.data?.vip ?? status?.vip)
-        const sB = streakBonus(streak)
-        const cB = cableBonus(iqiScore)
-        bonusLine =
-          `套餐+${pB} / 连续+${sB} / 光缆+${cB}` +
-          (iqiScore != null ? `（IQI=${iqiScore}）` : '（IQI 未取到）')
-        console.log(`[${tag}] 📈 加成构成: ${bonusLine}`)
-        if (iqiScore != null) {
-          if (iqiScore < 80) {
-            console.log(`[${tag}] 🎯 当前光缆指数处于低谷，Cable 加成已达最高档 +8`)
-          } else if (iqiScore < 85) {
-            console.log(`[${tag}] 光缆指数 ${iqiScore}，Cable 为 +5 档（低于 80 才能拿到 +8）`)
+          console.log(
+            `[${tag}] 光缆指数: ${insight.score ?? '未取到'} (${insight.level ?? '?'}) | 光缆加成: ${
+              cable == null ? '未取到' : '+' + cable
+            }${cableNote}`
+          )
+          if (insight.tiers.length) {
+            console.log(
+              `[${tag}] 档位表: ${insight.tiers.map((t) => `${t.label}:+${t.points}`).join(' | ')}`
+            )
           }
+        } catch (insightErr) {
+          console.log(`[${tag}] ℹ️ 光缆指数获取失败: ${insightErr.message}`)
         }
 
-        // 5. 交叉校验：识别「接口成功但实际降级」的情况
-        const expectedMin = 1 + pB + sB + cB
-        if (!alreadyCheckedIn && Number.isFinite(gained)) {
-          if (gained < expectedMin) {
+        // 5. 结算校验：只核对服务端给的 breakdown，不再用本地公式反推下限
+        if (breakdown) {
+          const declared = toNum(breakdown.points ?? gained)
+          const summed = breakdownSum(breakdown)
+          bonusLine = formatBreakdown(breakdown)
+          console.log(`[${tag}] 📈 积分构成: ${bonusLine || '无加成项'} → 合计 ${summed} 分`)
+          if (!alreadyCheckedIn && Number.isFinite(gained) && declared !== gained) {
             anomalies.push({
-              level: 'critical',
-              text: `得分低于理论下限：实得 ${gained} 分 < ${expectedMin} 分（Base1+套餐${pB}+连续${sB}+光缆${cB}）`,
+              level: 'warning',
+              text: `结算明细总计 ${declared} 分与接口返回的 ${gained} 分不一致`,
+            })
+          }
+          if (Math.abs(summed - declared) > 1e-6) {
+            anomalies.push({
+              level: 'warning',
+              text: `结算明细各分项之和 ${summed} 与总计 ${declared} 不一致，可能存在未识别的加成项`,
             })
             console.log(
-              `[${tag}] 🚨 得分异常: ${gained} 分低于理论下限 ${expectedMin} 分，存在加成项未生效`
+              `[${tag}] ⚠️ 分项之和 ${summed} 与总计 ${declared} 不一致，前端可能新增了加成项`
             )
-          } else {
-            console.log(`[${tag}] ✅ 得分校验通过: ${gained} ≥ 理论下限 ${expectedMin}`)
           }
+        } else if (cable != null && !alreadyCheckedIn) {
+          bonusLine = `光缆+${cable}`
+          console.log(
+            `[${tag}] ℹ️ 无 breakdown，仅能参考光缆加成 +${cable}，本次实得 ${
+              gained == null ? '未知' : gained + ' 分'
+            }`
+          )
         }
         if (!alreadyCheckedIn && Number(streak) === 0) {
           anomalies.push({
