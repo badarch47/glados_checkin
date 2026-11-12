@@ -1,0 +1,26 @@
+name: iqi-probe
+
+# 每小时采集一次网络质量指数，用于统计「一天中哪个时段 IQI 最低」。
+# 服务端在每小时 :42 左右重算快照，因此这里安排在 :50 采集（北京时间与 UTC 分钟数一致）。
+# 采样结果只写入运行日志，不修改仓库文件、不触发其他工作流。
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '50 * * * *'
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - name: Probe network index
+        env:
+          GLADOS: ${{ secrets.GLADOS }}
+          GLADOS2: ${{ secrets.GLADOS2 }}
+          GLADOS3: ${{ secrets.GLADOS3 }}
+          DOMAIN: ${{ secrets.DOMAIN }}
+        run: node .github/scripts/probe-iqi.js
