@@ -356,7 +356,7 @@ const glados = async () => {
         console.log(`[${tag}] 今日已签到过，继续查询剩余天数与积分...`)
       } else {
         gained = Number(action?.points)
-        breakdown = action?.breakdown || null
+        breakdown = action?.breakdown || action?.settlement || null
         console.log(
           `[${tag}] 本次获得积分: ${Number.isFinite(gained) ? gained + ' 分' : '未返回'} | 服务端消息: ${action?.message || ''}`
         )
@@ -367,7 +367,9 @@ const glados = async () => {
             }`
           )
         } else {
-          console.log(`[${tag}] ℹ️ 签到响应未带 breakdown，无法展示逐项构成`)
+          console.log(
+            `[${tag}] ℹ️ 签到响应未带 breakdown，无法展示逐项构成；响应字段: ${Object.keys(action || {}).join(',')}`
+          )
         }
       }
 
