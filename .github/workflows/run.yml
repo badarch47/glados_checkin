@@ -2,11 +2,20 @@ name: run
 
 # 定时说明
 # ---------------------------------------------------------------------------
-# GitHub Actions 的 cron 使用 UTC，且官方明确说明「高负载时会延迟，不保证准时」。
-# 实测（2026-11，本仓库 20 次 schedule 运行）延迟中位数约 +4.6 小时，远超官方说法。
-# 下面这条 = UTC 08:50 = 北京时间 16:50，按「目标时刻 − 延迟中位数」倒推，
-# 预期实际执行落在北京 21:30 前后，用于避开凌晨 IQI 高值区（指数越高，签到加成越低）。
-# 分钟选 :50 而非整点，是为了落到该小时的 :42 快照重算之后，拿到当小时的指数值。
+# GitHub Actions 的 cron 用 UTC，且只会「推迟」不会提前。本仓库实测（2026-11）
+# 延迟中位数约 +4.6 小时，长尾 +8.2 小时，官方不承诺上限。
+#
+# 目标有两个，且互相牵制：
+#   ① 签到落在 IQI 较低、光缆补偿较高的时段（目前定在北京 19:30 之后）；
+#   ② 绝不因延迟跨过北京零点 —— 跨零点会把这次签到算到第二天，
+#      等于今天漏签、明天顶掉，净亏一天积分。
+#
+# 做法：cron 只负责「保证当天能启动」，签到时刻交给脚本内部的窗口守候。
+#   下面这条 = UTC 06:20 = 北京 14:20 触发。
+#   · 准点触发 → 脚本原地等到北京 19:30 再签（等 5 小时 10 分，仍在单 job 6 小时上限内）
+#   · 延迟到北京 22:32 → 已过窗口，立即签
+#   · 只要延迟小于 9 小时 40 分，落点就一定还在当天之内（观测最大值 8.2 小时，余量约 1.5 小时）
+#   窗口起点可用仓库 Variable `CHECKIN_WINDOW_START`（格式 HH:MM）覆盖，不设置则默认 19:30。
 #
 # 【重要】不要保留 push 触发器：任何一次 commit/push 都会立刻跑一次签到，
 # 这是「签到时间随机」的最主要原因。改由 schedule + 手动 dispatch 触发。
@@ -14,7 +23,7 @@ name: run
 on:
   workflow_dispatch:
   schedule:
-    - cron: '50 8 * * *'
+    - cron: '20 6 * * *'
 
 # 同一时间只允许一个签到实例，避免重复签到 / 并发冲突
 concurrency:
@@ -27,7 +36,9 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 必须覆盖「等待 + 签到」的总时长，否则窗口守候会被提前掐断。
+    # GitHub 单个 job 硬上限就是 6 小时（360 分钟），这里直接拉满。
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -61,3 +72,5 @@ jobs:
           NOTIFY: ${{ secrets.NOTIFY }}
           AUTO_EXCHANGE: ${{ secrets.AUTO_EXCHANGE }}
           EXCHANGE_THRESHOLD: ${{ secrets.EXCHANGE_THRESHOLD }}
+          # 留空则脚本使用默认 19:30
+          CHECKIN_WINDOW_START: ${{ vars.CHECKIN_WINDOW_START }}
