@@ -283,6 +283,93 @@ const getNetworkInsight = async (domain, headers) => {
   }
 }
 
+// ========== 签到时间窗口守候 ==========
+// GitHub Actions 的 schedule 只会「推迟」，永远不会提前：本仓库实测延迟 0～8.2 小时，
+// 中位数约 4.6 小时，且官方不承诺任何上限。这带来两个硬约束：
+//   1) cron 必须提前触发，把「最晚落点」压在当天之内。一旦跨过北京零点，
+//      这次签到会被算到第二天，等于今天漏签、明天顶掉，净亏一天积分。
+//   2) 想让签到固定在 IQI 较低的晚间，就不能依赖 cron 自身的落点，
+//      只能在进程内部把时间「等」到位。
+// 于是：cron 定在北京 14:20 触发（UTC 06:20），脚本启动后等到北京 19:30 再签。
+//   最早 14:20 触发 → 原地等 5 小时 10 分 → 19:30 签到
+//   最晚 22:32 触发 → 已过窗口 → 立即签到 → 22:32 签到
+//   两种落点都在当天之内，且都落在晚间低值区。
+// 目标时刻可用环境变量 CHECKIN_WINDOW_START=HH:MM 覆盖，留空则用默认 19:30。
+const BJ_OFFSET_MS = 8 * 3600 * 1000
+const MAX_WAIT_MS = 5.5 * 3600 * 1000 // 单 job 上限 6 小时，留 30 分钟给安装与签到
+
+const pad2 = (n) => String(n).padStart(2, '0')
+
+// 用 UTC 取值器读出「北京时间」的各分量，避免受 runner / 本机时区影响
+const bjParts = (ts = Date.now()) => {
+  const d = new Date(ts + BJ_OFFSET_MS)
+  return {
+    y: d.getUTCFullYear(),
+    mo: d.getUTCMonth() + 1,
+    d: d.getUTCDate(),
+    h: d.getUTCHours(),
+    mi: d.getUTCMinutes(),
+    s: d.getUTCSeconds(),
+  }
+}
+
+const bjStamp = (ts) => {
+  const p = bjParts(ts)
+  return `${p.y}-${pad2(p.mo)}-${pad2(p.d)} ${pad2(p.h)}:${pad2(p.mi)}:${pad2(p.s)}`
+}
+
+const parseWindowStart = () => {
+  const raw = String(process.env.CHECKIN_WINDOW_START || '19:30').trim()
+  const m = /^(\d{1,2}):(\d{2})$/.exec(raw)
+  if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) {
+    console.log(`[时间窗口] CHECKIN_WINDOW_START="${raw}" 不是合法的 HH:MM，已回退默认 19:30`)
+    return { h: 19, m: 30 }
+  }
+  return { h: Number(m[1]), m: Number(m[2]) }
+}
+
+const waitForWindow = async () => {
+  const { h, m } = parseWindowStart()
+  const p = bjParts()
+  const nowMs = ((p.h * 60 + p.mi) * 60 + p.s) * 1000
+  const targetMs = (h * 60 + m) * 60 * 1000
+  const waitMs = targetMs - nowMs
+
+  if (waitMs <= 0) {
+    console.log(`[时间窗口] 当前北京 ${bjStamp()}，已过窗口起点 ${pad2(h)}:${pad2(m)}，立即执行签到`)
+    return
+  }
+  if (waitMs > MAX_WAIT_MS) {
+    console.log(
+      `[时间窗口] 当前北京 ${bjStamp()}，距 ${pad2(h)}:${pad2(m)} 还有 ${(waitMs / 3600000).toFixed(2)} 小时，` +
+        `超出单 job 6 小时的安全等待范围，改为立即签到`
+    )
+    if (p.h < 6) {
+      console.log(
+        '[时间窗口] ⚠️  本次触发已跨过北京零点，说明这一轮延迟超出预期（实测长尾 8.2 小时）。' +
+          '签到会记在今天，昨天那份需要到网页端手动补签。'
+      )
+    }
+    return
+  }
+
+  console.log(
+    `[时间窗口] 当前北京 ${bjStamp()}，原地等待 ${(waitMs / 60000).toFixed(1)} 分钟，到 ${pad2(h)}:${pad2(m)} 再签到`
+  )
+  const deadline = Date.now() + waitMs
+  // 每 10 分钟打一行心跳，长时间静默容易被误判成卡死
+  while (Date.now() < deadline - 10 * 60 * 1000) {
+    await sleep(10 * 60 * 1000)
+    const left = Math.round((deadline - Date.now()) / 60000)
+    if (left > 0) {
+      console.log(`[时间窗口] 心跳：距签到还有约 ${left} 分钟（北京 ${bjStamp()}）`)
+    }
+  }
+  const rest = deadline - Date.now()
+  if (rest > 0) await sleep(rest)
+  console.log(`[时间窗口] 已到窗口起点，北京 ${bjStamp()}，开始签到`)
+}
+
 // ========== GLaDOS 签到核心逻辑 ==========
 const glados = async () => {
   const notice = []
@@ -698,6 +785,7 @@ const notify = async (notice) => {
 
 // ========== 主入口 ==========
 const main = async () => {
+  await waitForWindow()
   const notice = await glados()
   await notify(notice)
   console.log('\n🎉 全部任务执行完毕')
