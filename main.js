@@ -329,6 +329,12 @@ const parseWindowStart = () => {
 }
 
 const waitForWindow = async () => {
+  // 手动触发（workflow_dispatch）语义是「现在就要签」——补签、排障、验证都走这条路，
+  // 不该被窗口守候拦住白等几个小时。定时触发才走守候逻辑。
+  if (process.env.GITHUB_EVENT_NAME === 'workflow_dispatch') {
+    console.log(`[时间窗口] 本次为手动触发，跳过守候，立即签到（北京 ${bjStamp()}）`)
+    return
+  }
   const { h, m } = parseWindowStart()
   const p = bjParts()
   const nowMs = ((p.h * 60 + p.mi) * 60 + p.s) * 1000
