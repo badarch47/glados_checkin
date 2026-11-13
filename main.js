@@ -245,6 +245,13 @@ const doCheckin = async (domain, headers) => {
   }
   const ttl = Number(ch.ttl) || 300000
   console.log(`  挑战已获取: nonce=${mask(String(ch.nonce), 6, 4)} ttl=${ttl}ms`)
+  // 诊断：打印挑战响应的完整结构（nonce 脱敏）。
+  // 服务端 2026-11-14 起在签到返回 code=5 / reason=turnstile，
+  // 需要确认挑战接口是否已经下发 sitekey / turnstile 之类的新字段。
+  console.log(
+    '  挑战响应结构: ' +
+      JSON.stringify(ch, (k, v) => (k === 'nonce' ? mask(String(v), 6, 4) : v))
+  )
 
   // 2) 等待人类反应时间（前端下限 2500ms，落在 excellent 档 <=5s）
   const wait = MIN_HUMAN_DELAY_MS + 300 + Math.floor(Math.random() * 1700)
@@ -261,7 +268,17 @@ const doCheckin = async (domain, headers) => {
     body: JSON.stringify({ token: domain, nonce: ch.nonce, proof }),
   })
   if (!res.ok) throw new Error(`签到接口HTTP错误: ${res.status} ${res.statusText}`)
-  return res.json()
+  const body = await res.json()
+  if (body?.code !== 0) {
+    // 诊断：Cloudflare 拦截时通常会带 cf-mitigated 头，可据此区分「业务拒绝」与「风控拦截」
+    console.log(
+      `  签到失败响应头: cf-mitigated=${res.headers.get('cf-mitigated') || '-'}` +
+        ` server=${res.headers.get('server') || '-'}` +
+        ` cf-ray=${res.headers.get('cf-ray') || '-'}`
+    )
+    console.log(`  签到失败响应体: ${JSON.stringify(body)}`)
+  }
+  return body
 }
 
 // ========== 网络质量指数（光缆加成的权威来源） ==========
