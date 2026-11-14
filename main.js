@@ -287,8 +287,10 @@ const doCheckin = async (domain, headers) => {
 // 纯 HTTP 请求拿不到（返回 code=5 / reason=turnstile）。这里用一个真实
 // Chromium 走完整协议，成功后返回与 HTTP 接口同构的响应体，主流程无需分支。
 const runBrowserChannel = async (domain, account, tag) => {
-  const headless = String(process.env.BROWSER_HEADED || '').toLowerCase() !== 'true'
-  const interactive = String(process.env.BROWSER_CLICK || '').toLowerCase() === 'true'
+  const headedFlag = String(process.env.BROWSER_HEADED || '').toLowerCase()
+  const headless = !(headedFlag === '1' || headedFlag === 'true')
+  const clickFlag = String(process.env.BROWSER_CLICK || '').toLowerCase()
+  const interactive = clickFlag === '1' || clickFlag === 'true'
   console.log(`[${tag}] 启动浏览器通道（${headless ? 'headless' : 'headed'}，交互点击=${interactive}）`)
   const body = await browserCheckin({
     domain,
@@ -707,6 +709,12 @@ const glados = async () => {
   console.log(`📊 统计结果：成功 ${successCount} 个 | 失败 ${failCount} 个`)
   if (criticalAnomalies > 0) {
     console.error(`🚨 共检出 ${criticalAnomalies} 项严重异常，本次任务标记为失败`)
+    process.exitCode = 1
+  }
+  // 只要有一个账号没签上，本次运行就必须标红。
+  // 否则「两个账号全失败」也会显示 success —— 这正是漏签长期无人察觉的原因之一。
+  if (failCount > 0) {
+    console.error(`🚨 ${failCount} 个账号签到失败，本次任务标记为失败`)
     process.exitCode = 1
   }
   return notice
