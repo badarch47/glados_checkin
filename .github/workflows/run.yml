@@ -22,6 +22,11 @@ name: run
 # ---------------------------------------------------------------------------
 on:
   workflow_dispatch:
+    inputs:
+      force_browser:
+        description: '跳过 HTTP 签到，直接走浏览器通道（排障用）'
+        type: boolean
+        default: false
   schedule:
     # 两条 cron 互为冗余：GitHub 偶尔会直接丢掉一次 schedule（2026-11-13 就全天没触发，
     # 导致当天漏签且没有任何通知）。第一条被丢时，第二条仍会在当天启动。
@@ -52,6 +57,16 @@ jobs:
       - name: Install
         run: npm ci || npm install
 
+      # Turnstile 兜底通道需要真实 Chromium。
+      # 装在前面而不是「失败后再装」，是因为安装要 1~2 分钟，
+      # 放在等待窗口之后会拖慢签到；这里装的成本可以忽略。
+      # --no-save 避免改动 package-lock.json。
+      - name: Install browser (optional)
+        run: |
+          npm i playwright --no-save --no-audit --no-fund
+          npx playwright install --with-deps chromium
+        continue-on-error: true
+
       # 签到前先确认协议没变。宽松模式：只打印告警，不阻断签到，
       # 避免误报导致漏签；严重变化由独立的 guard.yml 严格告警。
       - name: Protocol Guard
@@ -61,7 +76,14 @@ jobs:
           DOMAIN: ${{ secrets.DOMAIN }}
 
       - name: Checkin
-        run: npm run main
+        # 需要「有头」浏览器时用 xvfb 提供虚拟屏幕（runner 上没有真实显示器）
+        run: |
+          if [ "${BROWSER_HEADED}" = "1" ]; then
+            echo "使用 xvfb 运行有头浏览器"
+            xvfb-run -a --server-args="-screen 0 1280x800x24" npm run main
+          else
+            npm run main
+          fi
         env:
           GLADOS: ${{ secrets.GLADOS }}
           GLADOS_UA: ${{ secrets.GLADOS_UA }}
@@ -79,3 +101,10 @@ jobs:
           EXCHANGE_THRESHOLD: ${{ secrets.EXCHANGE_THRESHOLD }}
           # 留空则脚本使用默认 19:30
           CHECKIN_WINDOW_START: ${{ vars.CHECKIN_WINDOW_START }}
+          # 浏览器通道：HTTP 被 Turnstile 拦截时自动启用
+          # FORCE_BROWSER=true 可跳过 HTTP 直接走浏览器（排障用）
+          FORCE_BROWSER: ${{ inputs.force_browser }}
+          # 需要人工点击复选框时置 1（默认不点，先看能否静默出票）
+          BROWSER_CLICK: ${{ vars.BROWSER_CLICK }}
+          # 需要「有头」浏览器时置 1（runner 上需配合 xvfb-run）
+          BROWSER_HEADED: ${{ vars.BROWSER_HEADED }}
