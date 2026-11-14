@@ -806,6 +806,160 @@ const notify = async (notice) => {
   console.log('\n========== 通知推送模块结束 ==========')
 }
 
+// ========== 漏签核查（watchdog） ==========
+// 为什么单独做这一层：
+//   签到链路上任何一环无声失败，结果都是「今天没签到」而没有任何提示
+//   （2026-11-13 就是 GitHub 直接丢掉了 schedule，job 没启动，自然没有通知）。
+// 判定依据只认一件事：积分流水里有没有「今天」的记录。
+//   不认 /api/user/status 的字段，也不认签到接口的 code——两者都出现过
+//   「看起来成功、实际没有记一笔」的情况。
+const fetchJson = async (url, headers) => {
+  const res = await fetch(url, { method: 'GET', headers })
+  if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`)
+  return res.json()
+}
+
+// 返回 { ok, recorded, leftDays, points, streak, error }
+const inspectAccount = async (account, accountNo, domain) => {
+  const tag = `[核查] 账号 ${accountNo}|${account.envName}`
+  const headers = { ...buildBrowserHeaders(account.ua, domain), cookie: account.cookie }
+  const out = { ok: false, recorded: null, leftDays: null, points: null, streak: null, error: null }
+  try {
+    const status = await fetchJson(`https://${domain}/api/user/status`, headers)
+    if (status?.code !== 0) {
+      throw new Error(`登录状态异常: ${status?.message || '未知错误'} (code=${status?.code})`)
+    }
+    out.leftDays = Number(status?.data?.leftDays)
+
+    const pts = await fetchJson(`https://${domain}/api/user/points`, headers)
+    if (pts?.code !== 0) {
+      throw new Error(`积分接口异常: ${pts?.message || '未知错误'} (code=${pts?.code})`)
+    }
+    out.points = Number(pts?.points) || 0
+    out.streak = Number(pts?.streak) || 0
+    const history = pts?.history || pts?.list || []
+    out.recorded = hasRecordToday(history)
+    out.ok = true
+    console.log(
+      `${tag} 剩余 ${out.leftDays} 天 | 积分 ${out.points} | 连续 ${out.streak} 天 | ` +
+        `今日流水: ${out.recorded === true ? '有' : out.recorded === false ? '无' : '无法解析'}`
+    )
+  } catch (err) {
+    out.error = err.message
+    console.error(`${tag} ❌ ${err.message}`)
+  }
+  return out
+}
+
+// 去重：本次核查有两条 cron（22:40 / 23:20）互相兜底，但正常情况下两条都会跑。
+// 若前一条已经成功跑过并作出判断，后一条不再重复提醒，避免一天收到两条同样的消息。
+const hasEarlierWatchdogRunToday = async () => {
+  const token = process.env.GITHUB_TOKEN
+  const repo = process.env.GITHUB_REPOSITORY
+  if (!token || !repo) return false
+  try {
+    const dayStart = `${todayBeijing()}T00:00:00+08:00`
+    const q =
+      `https://api.github.com/repos/${repo}/actions/workflows/` +
+      `${process.env.WATCHDOG_WORKFLOW || 'watchdog.yml'}/runs` +
+      `?created=${encodeURIComponent('>=' + dayStart)}&per_page=30`
+    const res = await fetch(q, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: 'application/vnd.github+json',
+        'user-agent': 'glados-watchdog',
+      },
+    })
+    if (!res.ok) {
+      console.log(`ℹ️  查询历史核查记录失败（HTTP ${res.status}），按「无历史记录」处理`)
+      return false
+    }
+    const data = await res.json()
+    const runs = Array.isArray(data?.workflow_runs) ? data.workflow_runs : []
+    const others = runs.filter(
+      (r) => String(r.id) !== String(process.env.GITHUB_RUN_ID) && r.conclusion === 'success'
+    )
+    if (others.length) {
+      console.log(
+        `ℹ️  今天已有 ${others.length} 次核查成功执行（run ${others[others.length - 1].id}），本次不重复提醒`
+      )
+      return true
+    }
+    return false
+  } catch (err) {
+    console.log(`ℹ️  查询历史核查记录异常（${err.message}），按「无历史记录」处理`)
+    return false
+  }
+}
+
+const watchdog = async () => {
+  console.log('========== 漏签核查开始 ==========')
+  const domain = process.env.DOMAIN || 'glados.cloud'
+  const accounts = collectAccounts()
+  if (!accounts.length) {
+    console.log('⚠️  未配置任何账号，核查跳过')
+    return
+  }
+  const missing = [] // 确定没签的
+  const unknown = [] // 判定不了或查询失败的
+  const fine = []
+
+  for (const [index, account] of accounts.entries()) {
+    const accountNo = index + 1
+    const r = await inspectAccount(account, accountNo, domain)
+    const item = { accountNo, envName: account.envName, ...r }
+    if (r.error) unknown.push(item)
+    else if (r.recorded === false) missing.push(item)
+    else if (r.recorded === null) unknown.push(item)
+    else fine.push(item)
+  }
+
+  console.log(
+    `\n📊 核查结果：已签到 ${fine.length} | 漏签 ${missing.length} | 无法判定 ${unknown.length}`
+  )
+
+  if (missing.length === 0 && unknown.length === 0) {
+    console.log('✅ 全部账号今日已签到，无需提醒')
+    return
+  }
+
+  // 只在「有问题」时推送：正常时保持静默，避免每天多一条噪声消息
+  if (await hasEarlierWatchdogRunToday()) {
+    console.log('ℹ️  本次为当日重复核查，跳过提醒（问题已由前一次核查报出）')
+    if (missing.length) process.exitCode = 1
+    return
+  }
+
+  const now = new Date(Date.now() + BEIJING_OFFSET_MS).toISOString()
+  const stamp = `${now.slice(0, 10)} ${now.slice(11, 16)}`
+  const notice = [
+    missing.length
+      ? `🚨 GLaDOS 漏签提醒（${missing.length} 个账号未签）`
+      : '⚠️ GLaDOS 签到状态无法确认',
+    `核查时间: ${stamp}（北京时间）`,
+  ]
+
+  for (const it of missing) {
+    notice.push(
+      `账号${it.accountNo}(${it.envName}): **今日无签到记录** | 剩余 ${it.leftDays ?? '?'} 天 | ` +
+        `积分 ${it.points ?? '?'} | 连续 ${it.streak ?? '?'} 天`
+    )
+  }
+  for (const it of unknown) {
+    notice.push(
+      `账号${it.accountNo}(${it.envName}): 无法判定${it.error ? `（${it.error}）` : '（流水结构异常）'}`
+    )
+  }
+  notice.push('请到网页端手动签到一次，避免连续天数中断：https://glados.cloud/console/checkin')
+  if (process.env.GITHUB_RUN_ID) {
+    notice.push(`运行详情: https://github.com/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`)
+  }
+
+  await notify(notice)
+  // 用非零退出码把这次运行标红，让「漏签」在 Actions 里也一眼可见
+  if (missing.length) process.exitCode = 1
+}
+
 // ========== 主入口 ==========
 const main = async () => {
   await waitForWindow()
@@ -814,7 +968,16 @@ const main = async () => {
   console.log('\n🎉 全部任务执行完毕')
 }
 
-main().catch((err) => {
-  console.error('❌ 全局未捕获错误:', err)
-  process.exit(1)
-})
+const isWatchdog = process.argv.includes('--watchdog')
+
+if (isWatchdog) {
+  watchdog().catch((err) => {
+    console.error('❌ 核查任务未捕获错误:', err)
+    process.exit(1)
+  })
+} else {
+  main().catch((err) => {
+    console.error('❌ 全局未捕获错误:', err)
+    process.exit(1)
+  })
+}
