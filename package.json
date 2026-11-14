@@ -2,6 +2,7 @@
   "type": "module",
   "scripts": {
     "main": "node main.js",
-    "watchdog": "node main.js --watchdog"
+    "watchdog": "node main.js --watchdog",
+    "browser": "node main.js --browser"
   }
 }
