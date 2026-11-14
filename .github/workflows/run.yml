@@ -27,6 +27,14 @@ on:
         description: '跳过 HTTP 签到，直接走浏览器通道（排障用）'
         type: boolean
         default: false
+      browser_click:
+        description: '允许模拟点击 Turnstile 复选框'
+        type: boolean
+        default: false
+      browser_headed:
+        description: '使用有头浏览器（配合 xvfb）'
+        type: boolean
+        default: false
   schedule:
     # 两条 cron 互为冗余：GitHub 偶尔会直接丢掉一次 schedule（2026-11-13 就全天没触发，
     # 导致当天漏签且没有任何通知）。第一条被丢时，第二条仍会在当天启动。
@@ -105,6 +113,6 @@ jobs:
           # FORCE_BROWSER=true 可跳过 HTTP 直接走浏览器（排障用）
           FORCE_BROWSER: ${{ inputs.force_browser }}
           # 需要人工点击复选框时置 1（默认不点，先看能否静默出票）
-          BROWSER_CLICK: ${{ vars.BROWSER_CLICK }}
+          BROWSER_CLICK: ${{ inputs.browser_click || vars.BROWSER_CLICK }}
           # 需要「有头」浏览器时置 1（runner 上需配合 xvfb-run）
-          BROWSER_HEADED: ${{ vars.BROWSER_HEADED }}
+          BROWSER_HEADED: ${{ inputs.browser_headed && '1' || vars.BROWSER_HEADED }}
