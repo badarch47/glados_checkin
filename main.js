@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { browserCheckin } from './browser-checkin.js'
 
 // ========== 工具函数：敏感信息脱敏 ==========
 const mask = (str, startLen = 4, endLen = 4) => {
@@ -281,6 +282,24 @@ const doCheckin = async (domain, headers) => {
   return body
 }
 
+// ========== 浏览器兜底通道 ==========
+// 服务端对签到增加了 Cloudflare Turnstile 校验，令牌由浏览器执行 JS 后签发，
+// 纯 HTTP 请求拿不到（返回 code=5 / reason=turnstile）。这里用一个真实
+// Chromium 走完整协议，成功后返回与 HTTP 接口同构的响应体，主流程无需分支。
+const runBrowserChannel = async (domain, account, tag) => {
+  const headless = String(process.env.BROWSER_HEADED || '').toLowerCase() !== 'true'
+  const interactive = String(process.env.BROWSER_CLICK || '').toLowerCase() === 'true'
+  console.log(`[${tag}] 启动浏览器通道（${headless ? 'headless' : 'headed'}，交互点击=${interactive}）`)
+  const body = await browserCheckin({
+    domain,
+    cookie: account.cookie,
+    ua: account.ua,
+    headless,
+    interactive,
+  })
+  return body
+}
+
 // ========== 网络质量指数（光缆加成的权威来源） ==========
 // /api/user/network-insight 返回：
 //   data.current = { score, level, cablePoints, ... }
@@ -443,8 +462,24 @@ const glados = async () => {
       console.log(`[${tag}] UA(${account.uaSource}): ${mask(ua, 8, 8)}`)
 
       // 1. 带挑战签到
-      console.log(`[${tag}] 正在执行签到请求（含 challenge）...`)
-      const action = await doCheckin(domain, headers)
+      //    Turnstile 校验无法用纯 HTTP 通过，命中时自动切浏览器通道；
+      //    FORCE_BROWSER=true / --browser 可跳过 HTTP 直接走浏览器（排障用）。
+      const forceBrowser =
+        process.argv.includes('--browser') ||
+        String(process.env.FORCE_BROWSER || '').toLowerCase() === 'true'
+      console.log(
+        `[${tag}] 正在执行签到请求（${forceBrowser ? '浏览器通道' : 'HTTP + challenge'}）...`
+      )
+      let action
+      if (forceBrowser) {
+        action = await runBrowserChannel(domain, account, tag)
+      } else {
+        action = await doCheckin(domain, headers)
+        if (action?.code === 5 && action?.reason === 'turnstile') {
+          console.log(`[${tag}] 🛡️ 服务端要求 Cloudflare Turnstile，HTTP 通道无法满足，切换浏览器通道`)
+          action = await runBrowserChannel(domain, account, tag)
+        }
+      }
       console.log(`[${tag}] 签到接口响应码: ${action?.code ?? '无'}`)
 
       const alreadyCheckedIn = action?.code === 1
