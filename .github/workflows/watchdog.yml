@@ -16,6 +16,11 @@ name: watchdog
 # ---------------------------------------------------------------------------
 on:
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只打印提醒内容，不实际推送（排障用）'
+        type: boolean
+        default: false
   schedule:
     - cron: '40 14 * * *'  # UTC 14:40 = 北京 22:40
     - cron: '20 15 * * *'  # UTC 15:20 = 北京 23:20（兜底）
@@ -56,3 +61,4 @@ jobs:
           # 供脚本查询当日历史核查记录、生成运行链接
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WATCHDOG_WORKFLOW: watchdog.yml
+          WATCHDOG_DRY_RUN: ${{ inputs.dry_run }}
