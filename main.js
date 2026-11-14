@@ -955,6 +955,16 @@ const watchdog = async () => {
     notice.push(`运行详情: https://github.com/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`)
   }
 
+  const dryRun = String(process.env.WATCHDOG_DRY_RUN || '').toLowerCase() === 'true'
+  if (dryRun) {
+    console.log('🧪 DRY RUN：以下内容仅打印，不实际推送')
+    console.log('———————— 通知内容 ————————')
+    notice.forEach((l) => console.log('  ' + l))
+    console.log('————————————————————————')
+    if (missing.length) process.exitCode = 1
+    return
+  }
+
   await notify(notice)
   // 用非零退出码把这次运行标红，让「漏签」在 Actions 里也一眼可见
   if (missing.length) process.exitCode = 1
