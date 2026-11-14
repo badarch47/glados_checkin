@@ -1,0 +1,58 @@
+name: watchdog
+
+# 漏签核查（只核查，不签到）
+# ---------------------------------------------------------------------------
+# 存在的理由：签到链路上任何一环无声失败，结果都是「今天没签到」且没有任何提示。
+# 2026-11-13 就是 GitHub 直接丢掉了 run.yml 的 schedule —— job 根本没启动，
+# 所以企业微信也收不到任何消息，人完全无感。
+#
+# 本工作流与签到完全解耦：只读接口、只判断「今天的积分流水里有没有记录」。
+#   · 有记录 → 静默通过，不发消息（正常日不多打扰）
+#   · 无记录 → 退出码 1 + 推送企业微信，让漏签变成一件「看得见」的事
+#
+# 时间：北京 22:40 与 23:20 各一次。
+#   22:40 留出 1 小时 20 分给人工补签；23:20 用于兜底第一条 cron 被 GitHub 丢弃的情况。
+#   两条都跑时不重复提醒（由脚本查询当日历史 run 自行去重）。
+# ---------------------------------------------------------------------------
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '40 14 * * *'  # UTC 14:40 = 北京 22:40
+    - cron: '20 15 * * *'  # UTC 15:20 = 北京 23:20（兜底）
+
+# 与签到任务互不影响，独立排队
+concurrency:
+  group: glados-watchdog
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read  # 去重需要读取本工作流的历史运行记录
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 项目零依赖（只用 Node 内置模块），不需要 npm ci
+      - name: Check today's checkin
+        run: npm run watchdog
+        env:
+          GLADOS: ${{ secrets.GLADOS }}
+          GLADOS_UA: ${{ secrets.GLADOS_UA }}
+          GLADOS2: ${{ secrets.GLADOS2 }}
+          GLADOS_UA2: ${{ secrets.GLADOS_UA2 }}
+          GLADOS2_UA: ${{ secrets.GLADOS2_UA }}
+          GLADOS3: ${{ secrets.GLADOS3 }}
+          GLADOS_UA3: ${{ secrets.GLADOS_UA3 }}
+          GLADOS3_UA: ${{ secrets.GLADOS3_UA }}
+          DOMAIN: ${{ secrets.DOMAIN }}
+          NOTIFY: ${{ secrets.NOTIFY }}
+          # 供脚本查询当日历史核查记录、生成运行链接
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WATCHDOG_WORKFLOW: watchdog.yml
